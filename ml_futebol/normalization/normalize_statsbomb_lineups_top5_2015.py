@@ -24,6 +24,27 @@ def get_nested(data: dict[str, Any], *keys: str, default=None):
     return current
 
 
+def extract_source_match_id_from_source_file(source_file: str) -> str:
+    return source_file.split("\\")[-1].split("/")[-1].replace(".json", "")
+
+
+def fetch_target_source_match_ids() -> set[str]:
+    db_pool = get_db_pool()
+
+    query = """
+        SELECT source_match_id
+        FROM core.matches
+        WHERE source_name = 'statsbomb'
+    """
+
+    with db_pool.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+
+    return {str(row[0]) for row in rows}
+
+
 def fetch_raw_lineups() -> list[dict[str, Any]]:
     db_pool = get_db_pool()
 
@@ -38,7 +59,15 @@ def fetch_raw_lineups() -> list[dict[str, Any]]:
             cur.execute(query)
             rows = cur.fetchall()
 
-    return rows
+    valid_source_match_ids = fetch_target_source_match_ids()
+
+    filtered_rows = [
+        row
+        for row in rows
+        if extract_source_match_id_from_source_file(row["source_file"]) in valid_source_match_ids
+    ]
+
+    return filtered_rows
 
 
 def get_core_match_id(source_match_id: str) -> int | None:
@@ -105,7 +134,10 @@ def upsert_player(player_data: dict[str, Any]) -> int:
     source_player_id = str(player_data.get("player_id")) if player_data.get("player_id") is not None else None
     country = player_data.get("country", {})
     nationality = country.get("name") if isinstance(country, dict) else None
-    position_name = player_data.get("positions", [{}])[0].get("position") if player_data.get("positions") else None
+
+    positions = player_data.get("positions", [])
+    first_position = positions[0] if positions else {}
+    position_name = first_position.get("position")
 
     query = """
         INSERT INTO core.players (
@@ -139,7 +171,6 @@ def upsert_player(player_data: dict[str, Any]) -> int:
 
         conn.commit()
 
-    # fallback por nome normalizado
     query_select = """
         SELECT player_id
         FROM core.players
@@ -221,18 +252,18 @@ def upsert_lineup(
 
 
 def process_raw_lineup(payload: dict[str, Any], source_file: str) -> tuple[int, int]:
-    source_match_id = source_file.split("\\")[-1].split("/")[-1].replace(".json", "")
+    source_match_id = extract_source_match_id_from_source_file(source_file)
     match_id = get_core_match_id(source_match_id)
 
     if not match_id:
         raise ValueError(f"Match não encontrado em core.matches para source_match_id={source_match_id}")
 
-    team_data = payload.get("team_name")
+    team_name = payload.get("team_name")
     team_id_raw = payload.get("team_id")
 
-    team_id = get_core_team_id(str(team_id_raw) if team_id_raw is not None else None, team_data)
+    team_id = get_core_team_id(str(team_id_raw) if team_id_raw is not None else None, team_name)
     if not team_id:
-        raise ValueError(f"Team não encontrado em core.teams para team_id={team_id_raw}, team_name={team_data}")
+        raise ValueError(f"Team não encontrado em core.teams para team_id={team_id_raw}, team_name={team_name}")
 
     lineup = payload.get("lineup", [])
     players_processed = 0
@@ -254,9 +285,9 @@ def main():
     raw_lineups = fetch_raw_lineups()
 
     if not raw_lineups:
-        raise ValueError("Nenhum registro encontrado em raw.statsbomb_lineups.")
+        raise ValueError("Nenhum registro encontrado em raw.statsbomb_lineups para o recorte alvo.")
 
-    print(f"Total de lineups brutas encontradas: {len(raw_lineups)}")
+    print(f"Total de lineups brutas encontradas no recorte: {len(raw_lineups)}")
 
     processed = 0
     errors = 0
