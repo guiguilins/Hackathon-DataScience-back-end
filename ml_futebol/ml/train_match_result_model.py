@@ -22,9 +22,9 @@ from database.db import get_db_pool
 
 TARGET_COLUMN = "target_result"
 DATE_COLUMN = "match_date"
-ARTIFACT_DIR = Path("artifacts/match_result_model_rf_v2")
+ARTIFACT_DIR = Path("artifacts/match_result_model_rf_v3_fbref")
 
-NUMERIC_FEATURE_COLUMNS = [
+BASE_NUMERIC_FEATURE_COLUMNS = [
     "home_matches_played_before",
     "away_matches_played_before",
     "home_days_since_last_match",
@@ -69,17 +69,60 @@ NUMERIC_FEATURE_COLUMNS = [
     "diff_shots_avg",
     "diff_shots_on_target_avg",
 
-    # incrementais calculadas em Python
     "diff_days_rest",
     "diff_home_strength",
 ]
+
+FBREF_NUMERIC_FEATURE_COLUMNS = [
+    "home_lineup_xg_sum",
+    "away_lineup_xg_sum",
+    "home_lineup_xag_sum",
+    "away_lineup_xag_sum",
+
+    "home_lineup_shots_sum",
+    "away_lineup_shots_sum",
+    "home_lineup_shots_on_target_sum",
+    "away_lineup_shots_on_target_sum",
+
+    "home_lineup_tackles_sum",
+    "away_lineup_tackles_sum",
+    "home_lineup_interceptions_sum",
+    "away_lineup_interceptions_sum",
+    "home_lineup_blocks_sum",
+    "away_lineup_blocks_sum",
+
+    "home_goalkeeper_save_pct",
+    "away_goalkeeper_save_pct",
+
+    "home_fbref_matched_players",
+    "away_fbref_matched_players",
+
+    "diff_lineup_xg",
+    "diff_lineup_xag",
+    "diff_lineup_shots",
+    "diff_lineup_shots_on_target",
+    "diff_lineup_defense",
+    "diff_goalkeeper_save_pct",
+]
+
+NUMERIC_FEATURE_COLUMNS = BASE_NUMERIC_FEATURE_COLUMNS + FBREF_NUMERIC_FEATURE_COLUMNS
 
 CATEGORICAL_FEATURE_COLUMNS = [
     "competition_name",
 ]
 
 ALL_FEATURE_COLUMNS = NUMERIC_FEATURE_COLUMNS + CATEGORICAL_FEATURE_COLUMNS
-PYTHON_DERIVED_FEATURES = {"diff_days_rest", "diff_home_strength"}
+
+PYTHON_DERIVED_FEATURES = {
+    "diff_days_rest",
+    "diff_home_strength",
+    "diff_lineup_xg",
+    "diff_lineup_xag",
+    "diff_lineup_shots",
+    "diff_lineup_shots_on_target",
+    "diff_lineup_defense",
+    "diff_goalkeeper_save_pct",
+}
 
 
 def load_training_dataframe() -> pd.DataFrame:
@@ -87,7 +130,7 @@ def load_training_dataframe() -> pd.DataFrame:
 
     query = """
         SELECT *
-        FROM feature_store.training_match_pre_game_features_ml
+        FROM feature_store.training_match_pre_game_features_v2_ml
         ORDER BY match_date, match_id
     """
 
@@ -98,7 +141,7 @@ def load_training_dataframe() -> pd.DataFrame:
 
     if not rows:
         raise ValueError(
-            "Nenhum dado encontrado em feature_store.training_match_pre_game_features_ml."
+            "Nenhum dado encontrado em feature_store.training_match_pre_game_features_v2_ml."
         )
 
     df = pd.DataFrame(rows)
@@ -114,6 +157,24 @@ def add_incremental_features(df: pd.DataFrame) -> pd.DataFrame:
         "away_days_since_last_match",
         "home_home_last5_points_avg",
         "away_away_last5_points_avg",
+        "home_lineup_xg_sum",
+        "away_lineup_xg_sum",
+        "home_lineup_xag_sum",
+        "away_lineup_xag_sum",
+        "home_lineup_shots_sum",
+        "away_lineup_shots_sum",
+        "home_lineup_shots_on_target_sum",
+        "away_lineup_shots_on_target_sum",
+        "home_lineup_tackles_sum",
+        "away_lineup_tackles_sum",
+        "home_lineup_interceptions_sum",
+        "away_lineup_interceptions_sum",
+        "home_lineup_blocks_sum",
+        "away_lineup_blocks_sum",
+        "home_goalkeeper_save_pct",
+        "away_goalkeeper_save_pct",
+        "home_fbref_matched_players",
+        "away_fbref_matched_players",
     ]
 
     for col in numeric_to_force:
@@ -126,6 +187,35 @@ def add_incremental_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["diff_home_strength"] = (
         df["home_home_last5_points_avg"] - df["away_away_last5_points_avg"]
+    )
+
+    df["diff_lineup_xg"] = (
+        df["home_lineup_xg_sum"] - df["away_lineup_xg_sum"]
+    )
+
+    df["diff_lineup_xag"] = (
+        df["home_lineup_xag_sum"] - df["away_lineup_xag_sum"]
+    )
+
+    df["diff_lineup_shots"] = (
+        df["home_lineup_shots_sum"] - df["away_lineup_shots_sum"]
+    )
+
+    df["diff_lineup_shots_on_target"] = (
+        df["home_lineup_shots_on_target_sum"] - df["away_lineup_shots_on_target_sum"]
+    )
+
+    df["diff_lineup_defense"] = (
+        df["home_lineup_tackles_sum"].fillna(0)
+        + df["home_lineup_interceptions_sum"].fillna(0)
+        + df["home_lineup_blocks_sum"].fillna(0)
+        - df["away_lineup_tackles_sum"].fillna(0)
+        - df["away_lineup_interceptions_sum"].fillna(0)
+        - df["away_lineup_blocks_sum"].fillna(0)
+    )
+
+    df["diff_goalkeeper_save_pct"] = (
+        df["home_goalkeeper_save_pct"] - df["away_goalkeeper_save_pct"]
     )
 
     return df
@@ -290,21 +380,23 @@ def main() -> None:
     print("\n=== Distribuição inicial por competição ===")
     print(df["competition_name"].value_counts().sort_index().to_string())
 
-    # filtro de histórico mínimo
+    # filtro de histórico mínimo + cobertura FBref mínima
     df = df[
         (df["home_matches_played_before"] >= 5)
         & (df["away_matches_played_before"] >= 5)
+        & (df["home_fbref_matched_players"] >= 6)
+        & (df["away_fbref_matched_players"] >= 6)
     ].copy()
 
     if df.empty:
         raise ValueError(
-            "Após o filtro de histórico mínimo, não restaram linhas para treino."
+            "Após os filtros de histórico e cobertura FBref mínima, não restaram linhas para treino."
         )
 
     df = add_incremental_features(df)
     validate_final_dataframe(df)
 
-    print(f"\nTotal de linhas após filtro mínimo: {len(df)}")
+    print(f"\nTotal de linhas após filtros: {len(df)}")
     print_null_summary(df)
 
     train_df, valid_df, test_df = temporal_split(df)
@@ -345,9 +437,9 @@ def main() -> None:
     )
 
     model = RandomForestClassifier(
-        n_estimators=400,
-        max_depth=8,
-        min_samples_leaf=5,
+        n_estimators=500,
+        max_depth=10,
+        min_samples_leaf=4,
         random_state=42,
         n_jobs=-1,
         class_weight="balanced_subsample",
@@ -360,7 +452,7 @@ def main() -> None:
         ]
     )
 
-    print("\nTreinando modelo...")
+    print("\nTreinando modelo V3 com FBref...")
     pipeline.fit(X_train, y_train_enc)
 
     valid_metrics = evaluate_split(
@@ -381,8 +473,8 @@ def main() -> None:
 
     feature_importances = get_feature_importances(pipeline)
 
-    print("\n=== Top 25 importâncias ===")
-    print(feature_importances.head(25).to_string(index=False))
+    print("\n=== Top 30 importâncias ===")
+    print(feature_importances.head(30).to_string(index=False))
 
     metrics = {
         "valid": valid_metrics,

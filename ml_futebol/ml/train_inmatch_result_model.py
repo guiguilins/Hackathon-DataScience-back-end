@@ -5,15 +5,14 @@ from typing import Any
 
 import pandas as pd
 from psycopg.rows import dict_row
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, log_loss
+from sklearn.metrics import accuracy_score, classification_report, log_loss
 from xgboost import XGBClassifier
 
 from database.db import get_db_pool
 
 
 @dataclass
-class InPlayCalibrationComparison:
+class InPlayMatchResultTrainer:
     train_ratio: float = 0.70
     valid_ratio: float = 0.15
     random_state: int = 42
@@ -24,8 +23,13 @@ class InPlayCalibrationComparison:
         if df.empty:
             raise ValueError("A tabela feature_store.match_in_game_features está vazia.")
 
-        df = self._add_derived_features(df)
         self._validate_input(df)
+
+        print("\n=== DTYPES DAS FEATURES ===")
+        print(df[self._feature_columns()].dtypes)
+
+        print("\n=== SAMPLE DAS FEATURES ===")
+        print(df[self._feature_columns()].head())
 
         split_data = self._temporal_split_by_match(df)
 
@@ -33,65 +37,25 @@ class InPlayCalibrationComparison:
         X_valid, y_valid = self._prepare_xy(split_data["valid"])
         X_test, y_test = self._prepare_xy(split_data["test"])
 
-        models: dict[str, Any] = {}
-
-        base_model = self._build_base_model()
-        base_model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_train, y_train), (X_valid, y_valid)],
-            verbose=False,
+        model = self._train_model(
+            X_train=X_train,
+            y_train=y_train,
+            X_valid=X_valid,
+            y_valid=y_valid,
         )
-        models["no_calibration"] = base_model
 
-        sigmoid_model = CalibratedClassifierCV(
-            estimator=self._build_base_model(),
-            method="sigmoid",
-            cv=3,
-        )
-        sigmoid_model.fit(X_valid, y_valid)
-        models["sigmoid"] = sigmoid_model
-
-        isotonic_model = CalibratedClassifierCV(
-            estimator=self._build_base_model(),
-            method="isotonic",
-            cv=3,
-        )
-        isotonic_model.fit(X_valid, y_valid)
-        models["isotonic"] = isotonic_model
-
-        results: dict[str, Any] = {
-            "split_summary": self._build_split_summary(split_data),
+        results = {
+            "train": self._evaluate(model, X_train, y_train, "TRAIN"),
+            "valid": self._evaluate(model, X_valid, y_valid, "VALID"),
+            "test": self._evaluate(model, X_test, y_test, "TEST"),
+            "model": model,
             "feature_columns": list(X_train.columns),
-            "models": {},
+            "split_summary": self._build_split_summary(split_data),
         }
 
-        for model_name, model in models.items():
-            results["models"][model_name] = {
-                "train": self._evaluate(model, X_train, y_train),
-                "valid": self._evaluate(model, X_valid, y_valid),
-                "test": self._evaluate(model, X_test, y_test),
-            }
-
-        self._print_split_summary(results["split_summary"])
-        self._print_comparison_table(results["models"])
+        self._print_summary(results)
 
         return results
-
-    def _build_base_model(self) -> XGBClassifier:
-        return XGBClassifier(
-            objective="multi:softprob",
-            num_class=3,
-            n_estimators=200,
-            max_depth=4,
-            learning_rate=0.03,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_lambda=1.0,
-            random_state=self.random_state,
-            eval_metric="mlogloss",
-            tree_method="hist",
-        )
 
     def _load_features(self) -> pd.DataFrame:
         db_pool = get_db_pool()
@@ -104,7 +68,9 @@ class InPlayCalibrationComparison:
             competition_name,
             season_name,
             home_team_id,
+            home_team_name,
             away_team_id,
+            away_team_name,
             home_score_now,
             away_score_now,
             goal_diff_now,
@@ -196,20 +162,13 @@ class InPlayCalibrationComparison:
 
         return df
 
-    def _add_derived_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        df["is_draw_now"] = (df["goal_diff_now"] == 0).astype(int)
-        df["abs_goal_diff_now"] = df["goal_diff_now"].abs()
-        df["minute_progress"] = df["minute"] / 90.0
-        df["score_pressure"] = df["goal_diff_now"] * df["minute_progress"]
-        df["late_game_draw"] = ((df["goal_diff_now"] == 0) & (df["minute"] >= 60)).astype(int)
-        df["xg_pressure_diff"] = df["diff_xg_last_10"] * df["minute_progress"]
-        df["shots_pressure_diff"] = df["diff_shots_last_10"] * df["minute_progress"]
-        df["passes_pressure_diff"] = df["diff_passes_cum"] * df["minute_progress"]
-        return df
-
     def _validate_input(self, df: pd.DataFrame) -> None:
-        required_cols = {"match_id", "minute", "match_date", "target_result_final"}
+        required_cols = {
+            "match_id",
+            "minute",
+            "match_date",
+            "target_result_final",
+        }
         missing = required_cols - set(df.columns)
         if missing:
             raise ValueError(f"Colunas obrigatórias ausentes: {sorted(missing)}")
@@ -233,7 +192,9 @@ class InPlayCalibrationComparison:
 
         total_matches = len(match_df)
         if total_matches < 10:
-            raise ValueError(f"Poucas partidas para split robusto. Total: {total_matches}")
+            raise ValueError(
+                f"Poucas partidas para split temporal robusto. Total encontrado: {total_matches}"
+            )
 
         train_end = int(total_matches * self.train_ratio)
         valid_end = int(total_matches * (self.train_ratio + self.valid_ratio))
@@ -242,10 +203,14 @@ class InPlayCalibrationComparison:
         valid_matches = set(match_df.iloc[train_end:valid_end]["match_id"].tolist())
         test_matches = set(match_df.iloc[valid_end:]["match_id"].tolist())
 
+        train_df = df[df["match_id"].isin(train_matches)].copy()
+        valid_df = df[df["match_id"].isin(valid_matches)].copy()
+        test_df = df[df["match_id"].isin(test_matches)].copy()
+
         return {
-            "train": df[df["match_id"].isin(train_matches)].copy().sort_values(["match_date", "match_id", "minute"]).reset_index(drop=True),
-            "valid": df[df["match_id"].isin(valid_matches)].copy().sort_values(["match_date", "match_id", "minute"]).reset_index(drop=True),
-            "test": df[df["match_id"].isin(test_matches)].copy().sort_values(["match_date", "match_id", "minute"]).reset_index(drop=True),
+            "train": train_df.sort_values(["match_date", "match_id", "minute"]).reset_index(drop=True),
+            "valid": valid_df.sort_values(["match_date", "match_id", "minute"]).reset_index(drop=True),
+            "test": test_df.sort_values(["match_date", "match_id", "minute"]).reset_index(drop=True),
         }
 
     def _prepare_xy(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
@@ -257,23 +222,76 @@ class InPlayCalibrationComparison:
         null_counts = X.isnull().sum()
         null_counts = null_counts[null_counts > 0]
         if not null_counts.empty:
-            raise ValueError(f"Nulos nas features após cast: {null_counts.to_dict()}")
+            raise ValueError(
+                f"Nulos encontrados nas features após cast numérico: {null_counts.to_dict()}"
+            )
 
         y = df["target_result_final"].map({"H": 0, "D": 1, "A": 2})
+
         if y.isnull().any():
-            raise ValueError("Foram encontrados targets inválidos ou nulos.")
+            invalid_rows = df.loc[y.isnull(), ["match_id", "minute", "target_result_final"]]
+            raise ValueError(
+                f"Foram encontrados targets inválidos ou nulos:\n{invalid_rows.head(20).to_string(index=False)}"
+            )
 
-        return X.astype("float32"), y.astype(int)
+        y = y.astype(int)
 
-    def _evaluate(self, model: Any, X: pd.DataFrame, y: pd.Series) -> dict[str, float]:
+        return X.astype("float32"), y
+
+    def _train_model(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_valid: pd.DataFrame,
+        y_valid: pd.Series,
+    ) -> XGBClassifier:
+        model = XGBClassifier(
+            objective="multi:softprob",
+            num_class=3,
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=1.0,
+            random_state=self.random_state,
+            eval_metric="mlogloss",
+            tree_method="hist",
+        )
+
+        model.fit(
+            X_train,
+            y_train,
+            eval_set=[(X_train, y_train), (X_valid, y_valid)],
+            verbose=False,
+        )
+        return model
+
+    def _evaluate(
+        self,
+        model: XGBClassifier,
+        X: pd.DataFrame,
+        y: pd.Series,
+        split_name: str,
+    ) -> dict[str, Any]:
         pred = model.predict(X)
         proba = model.predict_proba(X)
 
-        return {
+        metrics = {
+            "split": split_name,
+            "rows": len(X),
             "accuracy": float(accuracy_score(y, pred)),
             "log_loss": float(log_loss(y, proba, labels=[0, 1, 2])),
-            "rows": int(len(X)),
+            "classification_report": classification_report(
+                y,
+                pred,
+                labels=[0, 1, 2],
+                target_names=["H", "D", "A"],
+                digits=4,
+                zero_division=0,
+            ),
         }
+        return metrics
 
     def _build_split_summary(self, split_data: dict[str, pd.DataFrame]) -> dict[str, Any]:
         summary = {}
@@ -290,9 +308,9 @@ class InPlayCalibrationComparison:
             }
         return summary
 
-    def _print_split_summary(self, split_summary: dict[str, Any]) -> None:
+    def _print_summary(self, results: dict[str, Any]) -> None:
         print("\n=== SPLIT SUMMARY ===")
-        for split_name, info in split_summary.items():
+        for split_name, info in results["split_summary"].items():
             print(f"\n=== {split_name.upper()} ===")
             print(f"Rows: {info['rows']}")
             print(f"Matches: {info['matches']}")
@@ -300,30 +318,25 @@ class InPlayCalibrationComparison:
             print("Target distribution:")
             print(info["target_distribution"])
 
-    def _print_comparison_table(self, models_results: dict[str, Any]) -> None:
-        rows = []
+        for split_name in ["train", "valid", "test"]:
+            metrics = results[split_name]
+            print(f"\n=== METRICS {split_name.upper()} ===")
+            print(f"Rows: {metrics['rows']}")
+            print(f"Accuracy: {metrics['accuracy']:.4f}")
+            print(f"Log loss: {metrics['log_loss']:.4f}")
+            print(metrics["classification_report"])
 
-        for model_name, split_results in models_results.items():
-            for split_name, metrics in split_results.items():
-                rows.append(
-                    {
-                        "model": model_name,
-                        "split": split_name,
-                        "rows": metrics["rows"],
-                        "accuracy": round(metrics["accuracy"], 4),
-                        "log_loss": round(metrics["log_loss"], 4),
-                    }
-                )
+        model = results["model"]
+        feature_names = results["feature_columns"]
+        importances = pd.DataFrame(
+            {
+                "feature": feature_names,
+                "importance": model.feature_importances_,
+            }
+        ).sort_values("importance", ascending=False)
 
-        comparison_df = pd.DataFrame(rows)
-        comparison_df = comparison_df.sort_values(["split", "model"]).reset_index(drop=True)
-
-        print("\n=== MODEL COMPARISON ===")
-        print(comparison_df.to_string(index=False))
-
-        print("\n=== BEST BY TEST LOG LOSS ===")
-        best_test = comparison_df[comparison_df["split"] == "test"].sort_values("log_loss", ascending=True)
-        print(best_test.to_string(index=False))
+        print("\n=== TOP 20 FEATURE IMPORTANCES ===")
+        print(importances.head(20).to_string(index=False))
 
     @staticmethod
     def _feature_columns() -> list[str]:
@@ -360,21 +373,13 @@ class InPlayCalibrationComparison:
             "diff_fouls_cum",
             "diff_passes_cum",
             "remaining_minutes",
-            "is_draw_now",
-            "abs_goal_diff_now",
-            "minute_progress",
-            "score_pressure",
-            "late_game_draw",
-            "xg_pressure_diff",
-            "shots_pressure_diff",
-            "passes_pressure_diff",
         ]
 
 
 if __name__ == "__main__":
-    comparison = InPlayCalibrationComparison(
+    trainer = InPlayMatchResultTrainer(
         train_ratio=0.70,
         valid_ratio=0.15,
         random_state=42,
     )
-    comparison.run()
+    results = trainer.run()
