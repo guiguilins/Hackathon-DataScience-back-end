@@ -1,4 +1,4 @@
-# 🏆 Sports Betting Prediction & Recommendation Platform
+# 🏆 Raposa da Sorte || Esportes da Sorte
 
 > Plataforma inteligente de análise e recomendação de apostas esportivas baseada em Machine Learning, dados históricos e agentes LLM.
 
