@@ -135,7 +135,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+hackaton-frontend/.env
 .envrc
 .venv
 env/

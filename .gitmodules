@@ -1,3 +1,4 @@
-[submodule "Hackathon-Agents-backend"]
-	path = Hackathon-Agents-backend
-	url = https://github.com/guiguilins/Hackathon-Agents-backend.git
+[submodule "hackaton-frontend"]
+	path = hackaton-frontend
+	url = https://github.com/stefany-macedo/hackaton-frontend.git
+	branch = master

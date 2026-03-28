@@ -15,3 +15,7 @@ alembic==1.16.5
 psycopg[binary]
 psycopg-pool
 python-dotenv
+fastapi
+uvicorn[standard]
+pydantic
+email-validator

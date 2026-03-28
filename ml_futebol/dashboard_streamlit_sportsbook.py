@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 
 from database.db import get_db_pool
 
-ARTIFACT_DIR = Path("artifacts/match_result_model_rf_v2")
+ARTIFACT_DIR = Path("../hackaton-frontend/artifacts/match_result_model_rf_v2")
 
 PRIMARY = "#22c55e"
 DARK_BG = "#0b1220"
