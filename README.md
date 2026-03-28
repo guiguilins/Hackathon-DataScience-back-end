@@ -33,7 +33,7 @@ Esta plataforma combina engenharia de dados, modelos de ML e agentes inteligente
 - 🤖 **Modelos de Machine Learning** — pré-jogo e in-play
 - ⚙️ **Backend robusto** — API REST com FastAPI
 - 🎯 **Recomendação personalizada** — baseada em perfil de risco do usuário
-- 🧠 **Agentes LLM** *(opcional)* — automação e interação via LangChain/LangGraph
+- 🧠 **Agentes LLM** — automação e interação via LangChain/LangGraph
 
 ---
 
@@ -246,15 +246,6 @@ for item in selected:
 ```python
 pool = SimpleConnectionPool(minconn=1, maxconn=10)
 ```
-
-### Problemas Comuns
-
-| Problema | Causa | Solução |
-|----------|-------|---------|
-| Max clients atingido | Pool saturado no Supabase | Fechar conexões explicitamente |
-| Conexões abertas | Falta de `conn.close()` | Usar context managers |
-| Porta duplicada | Processo já rodando | Verificar e matar processo anterior |
-| Erro de autenticação | Credenciais incorretas | Verificar `.env` |
 
 ---
 
